@@ -1,27 +1,18 @@
 """
 animation_canvas.py  –  AnimationCanvas widget
 ================================================
-Hiển thị animation tuỳ theo thuật toán:
+GA  → Animation mã vạch best-chromosome chiếm toàn màn hình.
+       Mỗi frame: cột mã vạch mới được append, scroll trái→phải.
 
-  GA  → Evolution Network  (cột thế hệ → cá thể → chromosome bar)
-         + Panel mã vạch best chromosome (dưới cùng)
-         + Tự động zoom để nhìn thấy hết tất cả cá thể
-
-  CSO → Cat Swarm Visualization  (scatter 2D)
-         + Panel 3D Fitness Landscape (bên phải, dùng matplotlib)
-         + Panel mã vạch best chromosome (dưới cùng)
-         + Mèo nhỏ & cách xa hơn
-
-Thay đổi toggle:
-  - Bật animation: chỉ HIỆN lại kết quả đã render, KHÔNG gọi start() lại.
-  - start() chỉ được gọi từ _on_single_done (khi nhấn Chạy).
+CSO → Cat Swarm 2D chiếm toàn màn hình (canvas chính lấp đầy).
+       + Panel 3D Fitness Landscape bên phải (zoom scroll + drag 4 góc + phóng to).
+       + Panel mã vạch best-chromosome phía dưới, đồng bộ theo frame mèo.
 """
 from __future__ import annotations
 import tkinter as tk
 import random
 import math
 
-# matplotlib cho 3D panel (CSO)
 try:
     import matplotlib
     matplotlib.use("TkAgg")
@@ -35,117 +26,75 @@ except ImportError:
 
 # ── Palette ──────────────────────────────────────────────────────────────────
 C_BG         = "#f4f6fb"
-C_NODE_BG    = "#ffffff"
-C_NODE_BEST  = "#eef4ff"
 C_TEXT       = "#1c2040"
 C_TEXT_DIM   = "#8890b0"
-C_BAR_1      = "#2ecb7e"
 C_BAR_1_BEST = "#4f7dff"
 C_BAR_0      = "#e8ecf4"
 C_BORDER     = "#dde3f2"
-C_LINE       = "#d5dbec"
-C_LINE_BEST  = "#4f7dff"
-
-# CSO palette
+C_PANEL_BG   = "#f0f3fa"
+C_PANEL_BDR  = "#c8d0e8"
+C_GRID       = "#e8ecf8"
 C_SEEK_BODY  = "#ffb347"
 C_TRACE_BODY = "#4f7dff"
 C_TRACE_BEST = "#2ecb7e"
-C_GRID       = "#e8ecf8"
 C_GBEST_RING = "#2ecb7e"
 
-# Best-bar panel
-C_PANEL_BG   = "#f0f3fa"
-C_PANEL_BDR  = "#c8d0e8"
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  AnimationCanvas
-# ─────────────────────────────────────────────────────────────────────────────
 class AnimationCanvas(tk.Frame):
     """
-    Frame chứa:
-      ┌─────────────────────────────┬──────────────┐
-      │  Canvas chính (GA/CSO anim) │  3D panel    │  ← CSO only
-      ├─────────────────────────────┴──────────────┤
-      │  Best-chromosome bar panel (cả GA & CSO)   │
-      └────────────────────────────────────────────┘
+    Layout GA:   canvas chính = best-bar full-screen (cột theo gen)
+    Layout CSO:  canvas chính = cat scatter | 3D panel bên phải
+                 best-bar panel ở dưới, đồng bộ frame
     """
-
-    # chiều cao panel mã vạch best chromosome
-    BEST_BAR_H = 54
 
     def __init__(self, master, **kw):
         kw.setdefault("bg", C_BG)
         super().__init__(master, **kw)
 
-        # ── layout frames ────────────────────────────────────────────────────
+        # top: canvas chính + 3D
         self._top_frame = tk.Frame(self, bg=C_BG)
         self._top_frame.pack(fill="both", expand=True)
 
-        self._best_bar_frame = tk.Frame(self._top_frame, bg=C_PANEL_BG,
-                                        height=self.BEST_BAR_H,
-                                        highlightbackground=C_PANEL_BDR,
-                                        highlightthickness=1)
-        # best bar sẽ được pack sau khi biết layout
-
-        # ── canvas chính ─────────────────────────────────────────────────────
-        self._canvas = tk.Canvas(self._top_frame, bg=C_BG,
-                                 highlightthickness=0)
+        self._canvas = tk.Canvas(self._top_frame, bg=C_BG, highlightthickness=0)
         self._canvas.pack(side="left", fill="both", expand=True)
 
-        # ── 3D panel (CSO, matplotlib) ───────────────────────────────────────
-        self._panel3d_frame: tk.Frame | None = None
-        self._fig3d        = None
-        self._ax3d         = None
-        self._canvas3d     = None
-        self._rot_angle    = 0 # góc xoay tự động
-        self._rot_elev     = 28         
-        self._rot_id       = None       # after-id cho xoay
+        # 3D panel
+        self._panel3d_frame = None
+        self._fig3d = self._ax3d = self._canvas3d = None
+        self._rot_angle    = 30.0
+        self._rot_elev     = 28.0
+        self._rot_id       = None
+        self._3d_zoom_scale = 1.0
+        self._3d_scatters:list = []
+        self._3d_dragging  = False
+        self._3d_drag_last = None
 
-        # ── best-bar canvas ──────────────────────────────────────────────────
-        self._bb_canvas = tk.Canvas(self._best_bar_frame, bg=C_PANEL_BG,
-                                    highlightthickness=0,
-                                    height=self.BEST_BAR_H)
+        # bottom best-bar (CSO)
+        self._bb_frame = tk.Frame(self, bg=C_PANEL_BG,
+                                  highlightbackground=C_PANEL_BDR,
+                                  highlightthickness=1)
+        self._bb_canvas = tk.Canvas(self._bb_frame, bg=C_PANEL_BG,
+                                    highlightthickness=0, height=64)
 
-        # ── state ────────────────────────────────────────────────────────────
-        self._populations   = []
-        self._current_gen   = 0
-        self._anim_id       = None
-        self._running       = False
-        self._speed_ms      = 100
-        self._history       = []
-        self._algorithm     = "GA"
-        self._n_items       = 30
-        self._pop_size      = 20
+        # state
+        self._algorithm  = "GA"
+        self._history:   list[float] = []
         self._best_solution_chrom: list[int] = []
+        self._frame_best_chroms:   list[list[int]] = []
+        self._cso_frames:          list[dict] = []
+        self._n_items  = 30
+        self._pop_size = 20
+        self._speed_ms = 100
+        self._current_gen = 0
+        self._anim_id     = None
+        self._running     = False
 
-        # CSO
-        self._cso_frames: list[dict] = []
+        self._canvas.bind("<Configure>", self._on_resize)
 
-        # best-chrom history per frame (both algos)
-        self._frame_best_chroms: list[list[int]] = []
-
-        # pan / zoom (GA canvas)
-        self._pan_x = 0.0
-        self._pan_y = 0.0
-        self._pan_start = None
-        self._scale = 1.0
-
-        # canvas event bindings
-        c = self._canvas
-        c.bind("<Configure>",       self._on_resize)
-        c.bind("<ButtonPress-3>",   self._on_pan_start)
-        c.bind("<B3-Motion>",       self._on_pan_move)
-        c.bind("<ButtonRelease-3>", self._on_pan_end)
-        c.bind("<MouseWheel>",      self._on_scroll)
-        c.bind("<Button-4>",        self._on_scroll)
-        c.bind("<Button-5>",        self._on_scroll)
-
-    # ══════════════════════════════  PUBLIC API  ══════════════════════════════
+    # ══════════════════════════════  PUBLIC  ══════════════════════════════════
 
     def start(self, history_best, best_solution=None, algorithm="GA",
-              speed_ms=100, n_items=30, pop_size=20,
-              cso_cat_data=None):
-        """Bắt đầu animation. Chỉ gọi từ _on_single_done."""
+              speed_ms=100, n_items=30, pop_size=20, cso_cat_data=None):
         self.stop()
 
         try:    self._history = [float(x) for x in history_best]
@@ -153,9 +102,7 @@ class AnimationCanvas(tk.Frame):
 
         self._best_solution_chrom = []
         if best_solution is not None:
-            try:
-                self._best_solution_chrom = [1 if bool(x) else 0
-                                             for x in best_solution]
+            try: self._best_solution_chrom = [1 if bool(x) else 0 for x in best_solution]
             except: pass
 
         self._algorithm = str(algorithm)
@@ -164,30 +111,17 @@ class AnimationCanvas(tk.Frame):
         try:    self._pop_size = max(1, int(pop_size))
         except: self._pop_size = 20
 
-        # Giới hạn tổng animation ≤ 5000ms
-        n_frames = len(self._history)
-        MAX_MS   = 5000
+        n_frames = max(1, len(self._history))
         try:    raw_ms = max(10, int(speed_ms))
         except: raw_ms = 100
-        if n_frames > 0:
-            self._speed_ms = max(10, min(raw_ms, MAX_MS // n_frames))
-        else:
-            self._speed_ms = raw_ms
+        self._speed_ms = max(10, min(raw_ms, 5000 // n_frames))
 
-        self._pan_x = 0.0; self._pan_y = 0.0
-        self._scale = 1.0
-
-        # Build data
         if self._algorithm == "CSO":
             self._build_cso_frames(cso_cat_data)
-            self._setup_3d_panel()
+            self._setup_layout_cso()
         else:
-            self._build_populations()
-            self._teardown_3d_panel()
-            self._auto_zoom_ga()   # zoom để nhìn thấy hết
-
-        # Best-bar
-        self._build_best_bar_panel()
+            self._build_ga_chroms()
+            self._setup_layout_ga()
 
         self._current_gen = 0
         self._running     = True
@@ -201,444 +135,246 @@ class AnimationCanvas(tk.Frame):
             self._anim_id = None
         self._stop_3d_rotation()
 
-    def replay(self):
-        """Chạy lại animation từ đầu với dữ liệu hiện tại (không rebuild)."""
-        if not self._history:
-            return
-        self.stop()
-        self._current_gen = 0
-        self._running     = True
-        self._tick()
-        if self._algorithm == "CSO":
-            self._start_3d_rotation()
+    # ══════════════════════════  LAYOUT  ══════════════════════════════════════
 
-    # ══════════════════════════  LAYOUT HELPERS  ══════════════════════════════
-
-    def _build_best_bar_panel(self):
-        """Tạo / reset panel mã vạch best chromosome."""
-        f = self._best_bar_frame
-        # pack lại đảm bảo luôn hiển thị dưới cùng
-        f.pack_forget()
-        f.pack(in_=self._top_frame, side="bottom", fill="x")
-        # pack canvas bên trong
-        self._bb_canvas.pack_forget()
-        self._bb_canvas.pack(fill="both", expand=True)
-        # Vẽ trống ban đầu
-        self._draw_best_bar([], 0.0, 0)
-
-    def _setup_3d_panel(self):
-        """Tạo panel 3D matplotlib bên phải (chỉ CSO)."""
-        if not _HAS_MPL:
-            return
+    def _setup_layout_ga(self):
         self._teardown_3d_panel()
+        self._bb_frame.pack_forget()
 
-        w = 260
-        f = tk.Frame(self._top_frame, bg=C_BG, width=w,
-                     highlightbackground=C_PANEL_BDR,
-                     highlightthickness=1)
-        f.pack(side="right", fill="y", padx=(4, 0))
-        f.pack_propagate(False)
-        self._panel3d_frame = f
+    def _setup_layout_cso(self):
+        self._bb_frame.pack_forget()
+        self._bb_frame.pack(side="bottom", fill="x")
+        self._bb_canvas.pack_forget()
+        self._bb_canvas.pack(fill="both", expand=True, padx=6, pady=4)
+        self._setup_3d_panel()
 
-        # Header label
-        tk.Label(f, text="3D Fitness Landscape",
-                 font=("Segoe UI", 8, "bold"),
-                 bg=C_BG, fg=C_TEXT).pack(pady=(6, 0))
+    # ══════════════════════════  GA BUILD  ════════════════════════════════════
 
-        # Figure
-        fig = plt.Figure(figsize=(2.6, 2.6), dpi=90, facecolor=C_BG)
-        ax  = fig.add_subplot(111, projection="3d")
-        ax.set_facecolor(C_BG)
-        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
-        self._fig3d = fig
-        self._ax3d  = ax
-
-        # Vẽ bề mặt Sphere-like (2 chiều x,y) — đại diện fitness landscape
-        self._draw_3d_surface()
-
-        cv = FigureCanvasTkAgg(fig, master=f)
-        cv.get_tk_widget().pack(fill="both", expand=True, padx=4, pady=4)
-        cv.draw()
-        self._canvas3d = cv
-
-        # Thêm label hướng dẫn
-        tk.Label(f, text="Drag: xoay  •  Auto-rotating",
-                 font=("Segoe UI", 7), bg=C_BG, fg=C_TEXT_DIM).pack(pady=(0, 4))
-
-        # Bind sự kiện drag để xoay thủ công
-        widget = cv.get_tk_widget()
-        widget.bind("<ButtonPress-1>",   self._3d_drag_start)
-        widget.bind("<B1-Motion>",       self._3d_drag_move)
-        widget.bind("<ButtonRelease-1>", self._3d_drag_end)
-        self._3d_drag_last = None
-
-        self._rot_angle = 30
-        self._rot_elev  = 28   # elevation cho xoay dọc
-        self._3d_surf   = None  # pre-computed surface object
-        self._3d_mesh   = None  # (X,Y,Z) mesh, tính 1 lần
-        self._start_3d_rotation()
-
-    def _init_3d_surface(self):
-        """Pre-compute mesh + vẽ surface 1 lần duy nhất. Gọi khi setup panel."""
-        if self._ax3d is None or not _HAS_MPL:
-            return
-        ax = self._ax3d
-        ax.cla()
-        ax.set_facecolor(C_BG)
-        N  = 22   # lưới nhỏ hơn → nhanh hơn
-        xs = np.linspace(-10, 10, N)
-        ys = np.linspace(-10, 10, N)
-        X, Y = np.meshgrid(xs, ys)
-        Z    = X**2 + Y**2
-        self._3d_mesh = (X, Y, Z)
-        self._3d_surf = ax.plot_surface(X, Y, Z,
-                                        cmap='YlGn', alpha=0.80,
-                                        linewidth=0, antialiased=False)
-        ax.set_xlabel('x₁', fontsize=7, labelpad=1)
-        ax.set_ylabel('x₂', fontsize=7, labelpad=1)
-        ax.set_zlabel('f(x)', fontsize=7, labelpad=1)
-        ax.tick_params(labelsize=6)
-        # Giữ các scatter object để update thay vì vẽ lại
-        self._3d_scatters = []
-
-    def _draw_3d_surface(self):
-        """Chỉ update góc nhìn và vị trí mèo — KHÔNG vẽ lại surface."""
-        if self._ax3d is None:
-            return
-        ax = self._ax3d
-
-        # Xoá scatter cũ, vẽ scatter mới (nhẹ hơn nhiều so với cla)
-        for sc in getattr(self, '_3d_scatters', []):
-            try: sc.remove()
-            except: pass
-        self._3d_scatters = []
-
-        if self._cso_frames and 0 <= self._current_gen < len(self._cso_frames):
-            frame = self._cso_frames[self._current_gen]
-            for cat in frame.get('cats', []):
-                cx = (cat['x'] - 0.5) * 20
-                cy = (cat['y'] - 0.5) * 20
-                cz = cx**2 + cy**2 + 2
-                if cat['is_gbest']:
-                    sc = ax.scatter([cx],[cy],[cz], c='#2ecb7e',
-                                    s=55, edgecolors='white', linewidths=1.2, depthshade=False)
-                elif cat['mode'] == 'trace':
-                    sc = ax.scatter([cx],[cy],[cz], c='#4f7dff',
-                                    s=25, edgecolors='white', linewidths=0.6,
-                                    alpha=0.9, depthshade=False)
-                else:
-                    sc = ax.scatter([cx],[cy],[cz], c='#ffb347',
-                                    s=20, alpha=0.8, depthshade=False)
-                self._3d_scatters.append(sc)
-
-        ax.view_init(elev=self._rot_elev, azim=self._rot_angle)
-
-    def _start_3d_rotation(self):
-        self._stop_3d_rotation()
-        self._init_3d_surface()   # vẽ surface 1 lần
-        self._do_rotate_3d()
-
-    def _stop_3d_rotation(self):
-        if self._rot_id:
-            try: self.after_cancel(self._rot_id)
-            except: pass
-            self._rot_id = None
-
-    def _do_rotate_3d(self):
-        if self._fig3d is None or self._ax3d is None or self._canvas3d is None:
-            return
-        # Chỉ tự xoay nếu không đang drag
-        if not getattr(self, "_3d_dragging", False):
-            self._rot_angle = (self._rot_angle + 1.2) % 360
-            self._draw_3d_surface()
-            try:
-                self._canvas3d.draw_idle()
-            except Exception:
-                return
-        self._rot_id = self.after(80, self._do_rotate_3d)
-
-    # ── 3D drag handlers ────────────────────────────────────────────────────
-    def _3d_drag_start(self, e):
-        self._3d_drag_last = (e.x, e.y)   # lưu cả x và y
-        self._3d_dragging  = True
-
-    def _3d_drag_move(self, e):
-        if self._3d_drag_last is not None and self._ax3d:
-            lx, ly = self._3d_drag_last
-            dx = e.x - lx
-            dy = e.y - ly
-            # Kéo ngang → xoay azimuth; kéo dọc → xoay elevation
-            self._rot_angle = (self._rot_angle - dx * 0.7) % 360
-            self._rot_elev  = max(-90, min(90, self._rot_elev - dy * 0.5))
-            self._draw_3d_surface()
-            try: self._canvas3d.draw_idle()
-            except: pass
-        self._3d_drag_last = (e.x, e.y)
-
-    def _3d_drag_end(self, e):
-        self._3d_dragging  = False
-        self._3d_drag_last = None
-
-    def _teardown_3d_panel(self):
-        self._stop_3d_rotation()
-        if self._panel3d_frame:
-            try: self._panel3d_frame.destroy()
-            except: pass
-            self._panel3d_frame = None
-        if self._fig3d:
-            try: plt.close(self._fig3d)
-            except: pass
-        self._fig3d = self._ax3d = self._canvas3d = None
-        self._3d_surf = self._3d_mesh = None
-        self._3d_scatters = []
-
-    # ══════════════════════════  AUTO ZOOM GA  ════════════════════════════════
-
-    def _auto_zoom_ga(self):
-        """
-        Tính scale để toàn bộ evolution network vừa khít canvas.
-        Gọi sau _build_populations() và sau Configure event.
-        """
-        try:
-            W = self._canvas.winfo_width()
-            H = self._canvas.winfo_height()
-            if W < 10 or H < 10:
-                # Chưa render – thử sau
-                self.after(60, self._auto_zoom_ga)
-                return
-
-            n_gen  = len(self._populations)
-            p_size = max(1, self._pop_size)
-            COL_W  = 90; COL_H = 34; X_GAP = 120; Y_GAP = 14
-            START_X = 40; START_Y = 60
-
-            total_w = START_X + n_gen * (COL_W + X_GAP)
-            total_h = START_Y + p_size * (COL_H + Y_GAP)
-
-            sx = (W - 20) / max(1, total_w)
-            sy = (H - 20) / max(1, total_h)
-            s  = max(0.1, min(1.0, min(sx, sy)))
-
-            self._scale = s
-            # căn giữa ngang
-            self._pan_x = (W - total_w * s) / 2
-            self._pan_y = 10.0
-        except Exception as e:
-            print("auto_zoom_ga:", e)
-
-    # ══════════════════════════  GA – BUILD DATA  ════════════════════════════
-
-    def _build_populations(self):
-        self._populations = []
+    def _build_ga_chroms(self):
         self._frame_best_chroms = []
-        try:
-            rng = random.Random(42)
-            n_history = len(self._history)
-            prev_best_idx = 0
+        rng = random.Random(42)
+        n   = max(1, self._n_items)
+        bc  = list(self._best_solution_chrom)
+        if len(bc) < n: bc += [0]*(n-len(bc))
+        bc = bc[:n]
+        n_hist = len(self._history)
+        for gi in range(n_hist):
+            if gi == n_hist - 1:
+                self._frame_best_chroms.append(list(bc))
+            else:
+                noise = max(0.0, 0.38*(1 - gi/max(1, n_hist-1)))
+                c2 = list(bc)
+                for bi in range(n):
+                    if rng.random() < noise: c2[bi] = 1-c2[bi]
+                self._frame_best_chroms.append(c2)
 
-            for gen, best_val in enumerate(self._history):
-                pop = []
-                val = float(best_val) if best_val is not None else 0.0
-                p_size = max(1, self._pop_size)
-                n_it   = max(1, self._n_items)
-                is_last_gen = (gen == n_history - 1)
-                best_idx = rng.randint(0, p_size - 1)
+    # ══════════════════════════  GA DRAW (single bar)  ══════════════════════════
 
-                for i in range(p_size):
-                    fit = val if i == best_idx else val * rng.uniform(0.6, 0.95)
+    def _draw_ga_frame(self, gen: int):
+        """
+        Vẽ 1 ô mã vạch ngang duy nhất chiếm toàn màn hình.
+        Mỗi frame = chromosome best của gen đó, các bit thay đổi theo thời gian.
+        """
+        c = self._canvas
+        c.delete("all")
+        W = c.winfo_width(); H = c.winfo_height()
+        if W < 10 or H < 10: return
 
-                    chrom = []
-                    if i == best_idx and self._best_solution_chrom:
-                        chrom = list(self._best_solution_chrom)
-                        if len(chrom) < n_it: chrom += [0] * (n_it - len(chrom))
-                        chrom = chrom[:n_it]
-                        if not is_last_gen:
-                            for _ in range(max(1, n_it // 8)):
-                                idx = rng.randint(0, n_it - 1)
-                                chrom[idx] = 1 - chrom[idx]
-                    else:
-                        prob = rng.uniform(0.2, 0.8)
-                        chrom = [1 if rng.random() < prob else 0
-                                 for _ in range(n_it)]
+        n_frames = len(self._frame_best_chroms)
+        if n_frames == 0: return
+        n_items = max(1, self._n_items)
 
-                    parents = []
-                    if gen > 0 and p_size > 0:
-                        p1 = prev_best_idx if i == best_idx else rng.randint(0, p_size-1)
-                        p2 = rng.randint(0, p_size - 1)
-                        parents = [p1, p2]
+        chrom = self._frame_best_chroms[gen] if gen < n_frames else []
+        fit   = self._history[gen] if gen < len(self._history) else 0.0
+        n_total = len(self._history)
 
-                    pop.append({"fit": fit, "chrom": chrom,
-                                "is_best": (i == best_idx), "parents": parents})
+        # ── Tiêu đề ──────────────────────────────────────────────────────────
+        n_ones = sum(chrom) if chrom else 0
+        title  = (f"GA  |  Gen {gen}/{n_total-1}"
+                  f"  ·  Best fit: {fit:.2f}"
+                  f"  ·  Genes ON: {n_ones}/{n_items}")
+        c.create_text(16, 22, text=title,
+                      font=("Segoe UI", 11, "bold"),
+                      fill=C_TEXT, anchor="w")
 
-                prev_best_idx = best_idx
-                self._populations.append(pop)
+        # ── Thanh tiến trình fitness (mini progress bar) ──────────────────────
+        max_fit = max(self._history) if self._history else 1.0
+        min_fit = min(self._history) if self._history else 0.0
+        BAR_PROG_H = 10
+        c.create_rectangle(16, 42, W-16, 42+BAR_PROG_H,
+                           fill="#e8ecf4", outline=C_BORDER, width=1)
+        prog = (fit - min_fit) / max(1e-9, max_fit - min_fit)
+        c.create_rectangle(16, 42, 16 + (W-32)*prog, 42+BAR_PROG_H,
+                           fill=C_BAR_1_BEST, outline="")
+        c.create_text(W-12, 47, text=f"{fit:.1f}/{max_fit:.1f}",
+                      font=("Consolas", 7), fill=C_TEXT_DIM, anchor="e")
 
-                # Lưu chrom best của gen này
-                best_chrom = pop[best_idx]["chrom"]
-                self._frame_best_chroms.append(best_chrom)
+        # ── Ô mã vạch chính ──────────────────────────────────────────────────
+        PAD_L = 16; PAD_R = 16
+        PAD_T = 66; PAD_B = 60   # chỗ cho tiêu đề trên + legend dưới
+        bx0 = PAD_L; bx1 = W - PAD_R
+        by0 = PAD_T; by1 = H - PAD_B
+        bw  = max(1, bx1 - bx0)
+        bh  = max(1, by1 - by0)
 
-        except Exception as e:
-            print(f"Lỗi tạo GA data: {e}")
+        if not chrom:
+            c.create_text(W//2, H//2, text="Chưa có dữ liệu",
+                          font=("Segoe UI", 12), fill=C_TEXT_DIM)
+            return
 
-    # ══════════════════════════  CSO – BUILD DATA  ════════════════════════════
+        n  = len(chrom)
+        sw = bw / n   # width mỗi bit
+
+        # Nền
+        c.create_rectangle(bx0, by0, bx1, by1,
+                           fill="#f0f4ff", outline=C_BORDER, width=1)
+
+        # Vẽ từng bit
+        for bi, bit in enumerate(chrom):
+            x0b = bx0 + bi * sw
+            x1b = x0b + sw
+            GAP = max(0.5, sw * 0.06)
+
+            if bit:
+                # Bit = 1: gradient xanh, sắc hơn ở giữa
+                c.create_rectangle(x0b + GAP, by0 + 2,
+                                   x1b - GAP, by1 - 2,
+                                   fill=C_BAR_1_BEST, outline="")
+            else:
+                # Bit = 0: xám nhạt
+                c.create_rectangle(x0b + GAP, by0 + 2,
+                                   x1b - GAP, by1 - 2,
+                                   fill="#dde4f2", outline="")
+
+        # Viền ngoài
+        c.create_rectangle(bx0, by0, bx1, by1,
+                           outline="#aab8e0", fill="", width=2)
+
+        # ── Nhãn bit index (dưới mã vạch) ────────────────────────────────────
+        step = max(1, n // 20)
+        for bi in range(0, n, step):
+            xc = bx0 + (bi + 0.5) * sw
+            c.create_text(xc, by1 + 10, text=str(bi),
+                          font=("Consolas", 6), fill=C_TEXT_DIM, anchor="n")
+        c.create_text(bx0, by1 + 22, text="Bit index →",
+                      font=("Segoe UI", 7), fill=C_TEXT_DIM, anchor="nw")
+
+        # ── Legend ───────────────────────────────────────────────────────────
+        ly = by1 + 24
+        c.create_rectangle(bx0,     ly, bx0+18, ly+12, fill=C_BAR_1_BEST, outline="")
+        c.create_text(bx0+22, ly+6, text="Gene = 1 (chọn)",
+                      font=("Segoe UI", 8), fill=C_TEXT, anchor="w")
+        c.create_rectangle(bx0+140, ly, bx0+158, ly+12, fill="#dde4f2", outline=C_BORDER)
+        c.create_text(bx0+162, ly+6, text="Gene = 0 (bỏ)",
+                      font=("Segoe UI", 8), fill=C_TEXT, anchor="w")
+
+    # ══════════════════════════  CSO BUILD  
+
+    # ══════════════════════════  CSO BUILD  ═══════════════════════════════════
 
     def _build_cso_frames(self, cso_cat_data=None):
-        self._cso_frames = []
-        self._frame_best_chroms = []
+        self._cso_frames = []; self._frame_best_chroms = []
         n_iter  = len(self._history)
         n_cats  = max(4, self._pop_size)
         n_items = max(1, self._n_items)
         rng     = random.Random(99)
 
         if cso_cat_data:
-            for it, frame_data in enumerate(cso_cat_data):
-                cats_out = []
-                best_fit = self._history[min(it, n_iter-1)] if self._history else 0.0
-                gbest_chrom = []
-                for c in frame_data.get("cats", []):
-                    cat_dict = {
-                        "x"       : float(c.get("x", rng.random())),
-                        "y"       : float(c.get("y", rng.random())),
-                        "fit"     : float(c.get("fit", best_fit)),
-                        "mode"    : c.get("mode", "seek"),
-                        "is_gbest": bool(c.get("is_gbest", False)),
-                        "chrom"   : list(c.get("chrom", [])),
-                    }
-                    cats_out.append(cat_dict)
-                    if cat_dict["is_gbest"]:
-                        gbest_chrom = cat_dict["chrom"]
-                self._cso_frames.append({
-                    "iteration": it,
-                    "best_fit" : best_fit,
-                    "cats"     : cats_out,
-                })
-                self._frame_best_chroms.append(gbest_chrom or self._best_solution_chrom)
-        else:
-            cat_positions  = [(rng.random(), rng.random()) for _ in range(n_cats)]
-            cat_velocities = [(rng.uniform(-0.04, 0.04),
-                               rng.uniform(-0.04, 0.04)) for _ in range(n_cats)]
-            cat_fit   = [rng.uniform(0.3, 0.9) for _ in range(n_cats)]
-            cat_chroms = []
-            for _ in range(n_cats):
-                p = rng.uniform(0.2, 0.8)
-                cat_chroms.append([1 if rng.random() < p else 0
-                                   for _ in range(n_items)])
+            for it, fd in enumerate(cso_cat_data):
+                bf = self._history[min(it, n_iter-1)] if self._history else 0.0
+                cats_out = []; gc = []
+                for cat in fd.get("cats", []):
+                    d = {"x": float(cat.get("x", rng.random())),
+                         "y": float(cat.get("y", rng.random())),
+                         "fit": float(cat.get("fit", bf)),
+                         "mode": cat.get("mode", "seek"),
+                         "is_gbest": bool(cat.get("is_gbest", False)),
+                         "chrom": list(cat.get("chrom", []))}
+                    cats_out.append(d)
+                    if d["is_gbest"]: gc = d["chrom"]
+                self._cso_frames.append({"iteration": it, "best_fit": bf, "cats": cats_out})
+                self._frame_best_chroms.append(gc or self._best_solution_chrom)
+            return
 
-            gbest_idx = int(max(range(n_cats), key=lambda i: cat_fit[i]))
-            gbest_pos = cat_positions[gbest_idx]
-            MR = 0.2
+        cat_pos = [(rng.random(), rng.random()) for _ in range(n_cats)]
+        cat_vel = [(rng.uniform(-0.04,0.04), rng.uniform(-0.04,0.04)) for _ in range(n_cats)]
+        cat_fit = [rng.uniform(0.3,0.9) for _ in range(n_cats)]
+        cat_chr = [[1 if rng.random()<rng.uniform(0.2,0.8) else 0 for _ in range(n_items)]
+                   for _ in range(n_cats)]
+        gbest_idx = max(range(n_cats), key=lambda i: cat_fit[i])
+        gbest_pos = cat_pos[gbest_idx]
 
-            for it in range(n_iter):
-                best_fit = self._history[it]
-                modes = ["trace" if rng.random() < MR else "seek"
-                         for _ in range(n_cats)]
+        for it in range(n_iter):
+            bf    = self._history[it]
+            modes = ["trace" if rng.random()<0.2 else "seek" for _ in range(n_cats)]
+            np_=list(cat_pos); nv=list(cat_vel); nf=list(cat_fit)
+            nc=[list(c) for c in cat_chr]
 
-                new_positions  = list(cat_positions)
-                new_velocities = list(cat_velocities)
-                new_fit        = list(cat_fit)
-                new_chroms     = [list(c) for c in cat_chroms]
-
-                for i in range(n_cats):
-                    x, y   = cat_positions[i]
-                    vx, vy = cat_velocities[i]
-
-                    if modes[i] == "trace":
-                        gx, gy = gbest_pos
-                        c1 = rng.uniform(1.05, 2.05)
-                        r  = rng.random()
-                        vx = max(-0.12, min(0.12, vx + c1*r*(gx - x)))
-                        vy = max(-0.12, min(0.12, vy + c1*r*(gy - y)))
-                        nx = max(0.05, min(0.95, x + vx))
-                        ny = max(0.05, min(0.95, y + vy))
-                        new_velocities[i] = (vx, vy)
-                        if self._best_solution_chrom and it == n_iter - 1:
-                            bc = list(self._best_solution_chrom)
-                            if len(bc) < n_items: bc += [0]*(n_items-len(bc))
-                            new_chroms[i] = bc[:n_items]
-                        else:
-                            for bit in range(n_items):
-                                if rng.random() < 0.15:
-                                    new_chroms[i][bit] = 1 - new_chroms[i][bit]
+            for i in range(n_cats):
+                x,y=cat_pos[i]; vx,vy=cat_vel[i]
+                if modes[i]=="trace":
+                    gx,gy=gbest_pos; c1=rng.uniform(1.05,2.05); r=rng.random()
+                    vx=max(-0.12,min(0.12,vx+c1*r*(gx-x)))
+                    vy=max(-0.12,min(0.12,vy+c1*r*(gy-y)))
+                    nx=max(0.05,min(0.95,x+vx)); ny=max(0.05,min(0.95,y+vy))
+                    nv[i]=(vx,vy)
+                    if self._best_solution_chrom and it==n_iter-1:
+                        b2=list(self._best_solution_chrom)
+                        if len(b2)<n_items: b2+=[0]*(n_items-len(b2))
+                        nc[i]=b2[:n_items]
                     else:
-                        SMP = 3
-                        best_copy     = (x, y)
-                        best_copy_fit = new_fit[i]
-                        for _ in range(SMP):
-                            cx_ = max(0.05, min(0.95, x + rng.uniform(-0.15, 0.15)))
-                            cy_ = max(0.05, min(0.95, y + rng.uniform(-0.15, 0.15)))
-                            cf  = min(new_fit[i] * rng.uniform(0.8, 1.15),
-                                      best_fit * 1.05)
-                            if cf > best_copy_fit:
-                                best_copy_fit = cf
-                                best_copy = (cx_, cy_)
-                        nx, ny = best_copy
-                        new_fit[i] = best_copy_fit
-                        for bit in range(n_items):
-                            if rng.random() < 0.08:
-                                new_chroms[i][bit] = 1 - new_chroms[i][bit]
+                        for b in range(n_items):
+                            if rng.random()<0.15: nc[i][b]=1-nc[i][b]
+                else:
+                    bc_=(x,y); bf_=nf[i]
+                    for _ in range(3):
+                        cx_=max(0.05,min(0.95,x+rng.uniform(-0.15,0.15)))
+                        cy_=max(0.05,min(0.95,y+rng.uniform(-0.15,0.15)))
+                        cf=min(nf[i]*rng.uniform(0.8,1.15),bf*1.05)
+                        if cf>bf_: bf_=cf; bc_=(cx_,cy_)
+                    nx,ny=bc_; nf[i]=bf_
+                    for b in range(n_items):
+                        if rng.random()<0.08: nc[i][b]=1-nc[i][b]
+                np_[i]=(nx,ny)
 
-                    new_positions[i] = (nx, ny)
+            bi2=max(range(n_cats),key=lambda i:nf[i])
+            nf[bi2]=bf; gbest_idx=bi2; gbest_pos=np_[bi2]
+            # Chrom gbest: tiến dần về best_solution theo iteration
+            if self._best_solution_chrom:
+                b2=list(self._best_solution_chrom)
+                if len(b2)<n_items: b2+=[0]*(n_items-len(b2))
+                b2=b2[:n_items]
+                # noise giảm dần: frame đầu sai nhiều, frame cuối = best_solution
+                noise_ratio = max(0.0, 0.45*(1 - it/max(1, n_iter-1)))
+                gb_chrom = list(b2)
+                for _b in range(n_items):
+                    if rng.random() < noise_ratio: gb_chrom[_b] = 1-gb_chrom[_b]
+                nc[bi2] = gb_chrom
 
-                best_i = int(max(range(n_cats), key=lambda i: new_fit[i]))
-                new_fit[best_i] = best_fit
-                gbest_idx = best_i
-                gbest_pos = new_positions[gbest_idx]
-                if self._best_solution_chrom:
-                    bc = list(self._best_solution_chrom)
-                    if len(bc) < n_items: bc += [0]*(n_items-len(bc))
-                    new_chroms[gbest_idx] = bc[:n_items]
+            cats_out=[{"x":np_[i][0],"y":np_[i][1],"fit":nf[i],
+                       "mode":modes[i],"is_gbest":(i==gbest_idx),"chrom":nc[i]}
+                      for i in range(n_cats)]
+            self._cso_frames.append({"iteration":it,"best_fit":bf,"cats":cats_out})
+            self._frame_best_chroms.append(list(nc[gbest_idx]))
+            cat_pos=np_; cat_vel=nv; cat_fit=nf; cat_chr=nc
 
-                cats_out = []
-                for i in range(n_cats):
-                    cats_out.append({
-                        "x"       : new_positions[i][0],
-                        "y"       : new_positions[i][1],
-                        "fit"     : new_fit[i],
-                        "mode"    : modes[i],
-                        "is_gbest": (i == gbest_idx),
-                        "chrom"   : new_chroms[i],
-                    })
-
-                self._cso_frames.append({
-                    "iteration": it,
-                    "best_fit" : best_fit,
-                    "cats"     : cats_out,
-                })
-                gbest_chrom = new_chroms[gbest_idx]
-                self._frame_best_chroms.append(gbest_chrom)
-
-                cat_positions  = new_positions
-                cat_velocities = new_velocities
-                cat_fit        = new_fit
-                cat_chroms     = new_chroms
-
-    # ══════════════════════════  TICK / DISPATCH  ════════════════════════════
+    # ══════════════════════════  TICK  ════════════════════════════════════════
 
     def _tick(self):
         if not self._running: return
         if self._canvas.winfo_width() < 10:
-            self._anim_id = self.after(50, self._tick)
-            return
+            self._anim_id = self.after(50, self._tick); return
         try:
             if self._algorithm == "CSO":
                 self._draw_cso_frame(self._current_gen)
-                max_frame = max(0, len(self._cso_frames) - 1)
-                # 3D panel tự cập nhật qua _do_rotate_3d loop riêng
+                self._draw_best_bar_cso(self._current_gen)
+                max_frame = max(0, len(self._cso_frames)-1)
             else:
                 self._draw_ga_frame(self._current_gen)
-                max_frame = max(0, len(self._populations) - 1)
-
-            # Cập nhật best-bar
-            if self._current_gen < len(self._frame_best_chroms):
-                chrom = self._frame_best_chroms[self._current_gen]
-                fit   = (self._history[self._current_gen]
-                         if self._current_gen < len(self._history) else 0.0)
-                self._draw_best_bar(chrom, fit, self._current_gen)
-
+                max_frame = max(0, len(self._frame_best_chroms)-1)
         except Exception as e:
-            print(f"LỖI VẼ FRAME: {e}")
-            self._running = False
-            return
+            import traceback; traceback.print_exc()
+            self._running = False; return
 
         if self._current_gen < max_frame:
             self._current_gen += 1
@@ -646,143 +382,7 @@ class AnimationCanvas(tk.Frame):
         else:
             self._running = False
 
-    # ══════════════════════════  BEST-BAR PANEL  ═════════════════════════════
-
-    def _draw_best_bar(self, chrom: list[int], fit: float, frame_idx: int):
-        """Vẽ mã vạch chromosome tốt nhất của frame hiện tại."""
-        bc = self._bb_canvas
-        try:
-            W = bc.winfo_width()
-            H = bc.winfo_height() or self.BEST_BAR_H
-        except:
-            return
-        if W < 10:
-            return
-
-        bc.delete("all")
-
-        # Nhãn trái
-        label = (f"Best  [{self._algorithm}]  "
-                 f"frame {frame_idx}  ·  fit={fit:.2f}")
-        bc.create_text(8, H//2, text=label,
-                       font=("Segoe UI", 8, "bold"),
-                       fill=C_TEXT, anchor="w")
-
-        if not chrom:
-            return
-
-        # Tính vùng bar
-        lbl_w = 220
-        bar_x0 = lbl_w
-        bar_x1 = W - 10
-        bar_w  = max(1, bar_x1 - bar_x0)
-        BAR_H  = 20
-        bar_y0 = (H - BAR_H) // 2
-        bar_y1 = bar_y0 + BAR_H
-
-        n = len(chrom)
-        bw = bar_w / max(1, n)
-
-        for bi, bit in enumerate(chrom):
-            x0 = bar_x0 + bi * bw
-            x1 = x0 + bw * 0.88
-            color = C_BAR_1_BEST if bit else C_BAR_0
-            bc.create_rectangle(x0, bar_y0, x1, bar_y1,
-                                fill=color, outline="")
-
-        # Viền ngoài
-        bc.create_rectangle(bar_x0, bar_y0, bar_x1, bar_y1,
-                            outline=C_BORDER, fill="", width=1)
-
-        # Nhỏ: số lượng gen = 1
-        n_ones = sum(chrom)
-        bc.create_text(bar_x1 + 2, H//2,
-                       text=f"{n_ones}/{n}",
-                       font=("Consolas", 7),
-                       fill=C_TEXT_DIM, anchor="w")
-
-    # ══════════════════════════  GA DRAW  ════════════════════════════════════
-
-    def _draw_ga_frame(self, current_gen: int):
-        c = self._canvas
-        c.delete("all")
-        W = c.winfo_width(); H = c.winfo_height()
-        if W < 10 or H < 10: return
-
-        s = self._scale; px = self._pan_x; py = self._pan_y
-        def tx(x): return x * s + px
-        def ty(y): return y * s + py
-        def ts(v): return max(1, int(v * s))
-
-        COL_W = 90; COL_H = 34
-        X_GAP = 120; Y_GAP = 14
-        START_X = 40; START_Y = 60
-
-        # Auto-pan theo gen hiện tại (chỉ khi đang chạy)
-        if self._running and self._pan_start is None:
-            right_x = START_X + current_gen * (COL_W + X_GAP) + COL_W
-            target_px = W - 100 - right_x * s
-            if target_px < self._pan_x:
-                self._pan_x += (target_px - self._pan_x) * 0.25
-
-        for g in range(current_gen + 1):
-            if g >= len(self._populations): continue
-            x1 = START_X + g * (COL_W + X_GAP)
-            x2 = x1 + COL_W
-            if tx(x2) < -100 or tx(x1) > W + 100: continue
-
-            # Dây nối
-            if g > 0:
-                prev_x2 = START_X + (g-1) * (COL_W + X_GAP) + COL_W
-                for ci, ind in enumerate(self._populations[g]):
-                    y2 = START_Y + ci * (COL_H + Y_GAP) + COL_H / 2
-                    for p_i in ind.get("parents", []):
-                        if p_i >= len(self._populations[g-1]): continue
-                        y1 = START_Y + p_i * (COL_H + Y_GAP) + COL_H / 2
-                        is_bl = (ind.get("is_best") and
-                                 self._populations[g-1][p_i].get("is_best"))
-                        c.create_line(tx(prev_x2), ty(y1), tx(x1), ty(y2),
-                                      fill=C_LINE_BEST if is_bl else C_LINE,
-                                      width=ts(2 if is_bl else 1))
-
-            c.create_text(tx(x1 + COL_W/2), ty(START_Y - 20),
-                          text=f"Gen {g}",
-                          font=("Segoe UI", max(8, ts(9)), "bold"),
-                          fill=C_TEXT)
-
-            for i, ind in enumerate(self._populations[g]):
-                y1 = START_Y + i * (COL_H + Y_GAP)
-                y2 = y1 + COL_H
-                if ty(y2) < -100 or ty(y1) > H + 100: continue
-                is_best = ind.get("is_best", False)
-                self._rrect(tx(x1), ty(y1), tx(x2), ty(y2), r=ts(4),
-                            fill=C_NODE_BEST if is_best else C_NODE_BG,
-                            outline=C_BAR_1_BEST if is_best else C_BORDER)
-                c.create_text(tx(x1+6), ty(y1+10),
-                              text=f"Fit:{ind.get('fit',0):.1f}",
-                              font=("Consolas", max(6, ts(7)),
-                                    "bold" if is_best else "normal"),
-                              fill=C_BAR_1_BEST if is_best else C_TEXT_DIM,
-                              anchor="w")
-                bar_y1 = y1 + 20; bar_y2 = y2 - 6
-                total_bar_w = COL_W - 12
-                w_per_bar   = total_bar_w / max(1, self._n_items)
-                for bit_idx, bit in enumerate(ind.get("chrom", [])):
-                    bx1_ = x1 + 6 + bit_idx * w_per_bar
-                    bx2_ = bx1_ + w_per_bar * 0.75
-                    bc_  = (C_BAR_1_BEST if is_best else C_BAR_1) if bit else C_BAR_0
-                    c.create_rectangle(tx(bx1_), ty(bar_y1),
-                                       tx(bx2_), ty(bar_y2),
-                                       fill=bc_, outline="")
-
-        title = (f"GA  |  Gen {current_gen}/"
-                 f"{max(0, len(self._populations)-1)}"
-                 f"  [scroll chuột=zoom, kéo phải=pan]")
-        c.create_text(12, 16, text=title,
-                      font=("Segoe UI", 10, "bold"),
-                      fill=C_TEXT, anchor="w")
-
-    # ══════════════════════════  CSO DRAW  ═══════════════════════════════════
+    # ══════════════════════════  CSO DRAW  ════════════════════════════════════
 
     def _draw_cso_frame(self, frame_idx: int):
         c = self._canvas
@@ -791,226 +391,356 @@ class AnimationCanvas(tk.Frame):
         if W < 10 or H < 10: return
         if not self._cso_frames: return
 
-        frame_idx = max(0, min(frame_idx, len(self._cso_frames) - 1))
-        frame     = self._cso_frames[frame_idx]
+        frame_idx = max(0, min(frame_idx, len(self._cso_frames)-1))
+        frame = self._cso_frames[frame_idx]
 
-        MARGIN   = 52
-        LEGEND_H = 44
-        plot_x0  = MARGIN
-        plot_y0  = MARGIN + 28
-        plot_x1  = W - MARGIN
-        plot_y1  = H - MARGIN - LEGEND_H
-        plot_w   = max(10, plot_x1 - plot_x0)
-        plot_h   = max(10, plot_y1 - plot_y0)
+        PAD_T=44; PAD_B=36; PAD_L=42; PAD_R=12
+        px0=PAD_L; py0=PAD_T; px1=W-PAD_R; py1=H-PAD_B
+        pw=max(1,px1-px0); ph=max(1,py1-py0)
+        def to_px(nx,ny): return px0+nx*pw, py0+ny*ph
 
-        def to_px(nx, ny):
-            return plot_x0 + nx * plot_w, plot_y0 + ny * plot_h
+        # Nền + lưới
+        c.create_rectangle(px0,py0,px1,py1, fill="#f8faff", outline=C_BORDER)
+        for gi in range(1,7):
+            t=gi/7
+            c.create_line(px0+t*pw,py0,px0+t*pw,py1, fill=C_GRID, dash=(4,4))
+            c.create_line(px0,py0+t*ph,px1,py0+t*ph, fill=C_GRID, dash=(4,4))
 
-        # 1. Nền & lưới
-        c.create_rectangle(plot_x0, plot_y0, plot_x1, plot_y1,
-                           fill="#f8faff", outline=C_BORDER, width=1)
-        for gi in range(1, 6):
-            t = gi / 6
-            gx = plot_x0 + t * plot_w
-            gy = plot_y0 + t * plot_h
-            c.create_line(gx, plot_y0, gx, plot_y1,
-                          fill=C_GRID, width=1, dash=(4, 4))
-            c.create_line(plot_x0, gy, plot_x1, gy,
-                          fill=C_GRID, width=1, dash=(4, 4))
+        c.create_text(px0+pw//2,py1+16, text="Dimension 1 (X₁)",
+                      font=("Segoe UI",8), fill=C_TEXT_DIM)
+        c.create_text(14,py0+ph//2, text="Dim 2\n(X₂)",
+                      font=("Segoe UI",7), fill=C_TEXT_DIM)
 
-        # 2. Trục nhãn
-        c.create_text(plot_x0 + plot_w//2, plot_y1 + 16,
-                      text="Dim-1 (X₁)",
-                      font=("Segoe UI", 8), fill=C_TEXT_DIM)
-        c.create_text(plot_x0 - 30, plot_y0 + plot_h//2,
-                      text="Dim-2\n(X₂)",
-                      font=("Segoe UI", 8), fill=C_TEXT_DIM)
+        cats=frame.get("cats",[]); n_cats=len(cats)
+        if n_cats==0: return
 
-        cats   = frame.get("cats", [])
-        n_cats = len(cats)
-        if n_cats == 0: return
-
-        # 3. Vòng tìm kiếm cho seeking cats (nhỏ hơn)
-        SEEK_RADIUS = 0.08
+        # Seeking radius
+        SR=0.07
         for cat in cats:
-            if cat["mode"] == "seek" and not cat["is_gbest"]:
-                cx, cy = to_px(cat["x"], cat["y"])
-                rx = SEEK_RADIUS * plot_w
-                ry = SEEK_RADIUS * plot_h
-                c.create_oval(cx-rx, cy-ry, cx+rx, cy+ry,
-                              outline=C_SEEK_BODY, fill="",
-                              width=1, dash=(3, 5))
+            if cat["mode"]=="seek" and not cat["is_gbest"]:
+                cx,cy=to_px(cat["x"],cat["y"])
+                c.create_oval(cx-SR*pw,cy-SR*ph,cx+SR*pw,cy+SR*ph,
+                              outline=C_SEEK_BODY,fill="",width=1,dash=(3,5))
 
-        # 4. Đường kết nối tracing → gbest
-        gbest_cat = next((ct for ct in cats if ct["is_gbest"]), None)
-        if gbest_cat:
-            gx, gy = to_px(gbest_cat["x"], gbest_cat["y"])
+        # Trace arrows
+        gbest=next((ct for ct in cats if ct["is_gbest"]),None)
+        if gbest:
+            gx,gy=to_px(gbest["x"],gbest["y"])
             for cat in cats:
-                if cat["mode"] == "trace" and not cat["is_gbest"]:
-                    cx, cy = to_px(cat["x"], cat["y"])
-                    c.create_line(cx, cy, gx, gy,
-                                  fill=C_TRACE_BODY, width=1,
-                                  dash=(6, 4), arrow="last",
-                                  arrowshape=(6, 8, 3))
+                if cat["mode"]=="trace" and not cat["is_gbest"]:
+                    cx,cy=to_px(cat["x"],cat["y"])
+                    c.create_line(cx,cy,gx,gy,fill=C_TRACE_BODY,
+                                  width=1,dash=(6,4),arrow="last",arrowshape=(7,9,3))
 
-        # 5. Vẽ mèo — nhỏ hơn và spacing tốt hơn
-        # Bán kính nhỏ hơn so với trước (max 16 thay vì 26)
-        BASE_R = max(8, min(16, int(260 / max(8, n_cats))))
+        # Tính bán kính mèo theo diện tích
+        area_per = (pw*ph)/max(1,n_cats)
+        BASE_R   = max(8, min(18, int(math.sqrt(area_per)*0.18)))
 
         for cat in cats:
-            cx, cy = to_px(cat["x"], cat["y"])
-            r        = BASE_R
-            mode     = cat["mode"]
-            is_gbest = cat["is_gbest"]
+            cx,cy=to_px(cat["x"],cat["y"])
+            r=BASE_R; mode=cat["mode"]; ig=cat["is_gbest"]
 
-            if is_gbest:
-                body_c   = C_TRACE_BEST
-                border_c = "#1a9962"
-                border_w = 2
-            elif mode == "trace":
-                body_c   = C_TRACE_BODY
-                border_c = "#2244cc"
-                border_w = 2
+            if ig:      bc_=C_TRACE_BEST; bdr="#1a9962"; bw_=2
+            elif mode=="trace": bc_=C_TRACE_BODY; bdr="#2244cc"; bw_=2
+            else:       bc_=C_SEEK_BODY;  bdr="#cc6600"; bw_=1
+
+            if ig:
+                c.create_oval(cx-r-7,cy-r-7,cx+r+7,cy+r+7,
+                              outline=C_GBEST_RING,width=2,fill="#e8fff4",dash=(4,3))
+            c.create_oval(cx-r,cy-r+3,cx+r,cy+r+3, fill=bc_,outline=bdr,width=bw_)
+
+            eh=max(5,r//2); ew=max(3,r//3)
+            c.create_polygon(cx-r+2,cy-r+3, cx-r+2+ew,cy-r+3-eh, cx-r+2+ew*2,cy-r+3,
+                             fill=bdr,outline="")
+            c.create_polygon(cx+r-2,cy-r+3, cx+r-2-ew,cy-r+3-eh, cx+r-2-ew*2,cy-r+3,
+                             fill=bdr,outline="")
+
+            ey_=cy-r//4+3; eof_=max(2,r//3)
+            for ex_ in (cx-eof_,cx+eof_):
+                c.create_oval(ex_-2,ey_-2,ex_+2,ey_+2, fill="white",outline=bdr)
+                c.create_oval(ex_-1,ey_-1,ex_+1,ey_+1, fill="#111",outline="")
+
+            tbx=cx+r-2; tby=cy+r//2+3
+            if mode=="trace":
+                c.create_line(tbx,tby,tbx+r,tby-r//2, fill=bdr,width=2,smooth=True)
             else:
-                body_c   = C_SEEK_BODY
-                border_c = "#cc6600"
-                border_w = 1
+                c.create_line(tbx,tby,tbx+r//2,tby+r//2,tbx+r,tby,
+                              fill=bdr,width=2,smooth=True)
 
-            # Vòng sáng gbest
-            if is_gbest:
-                c.create_oval(cx-r-6, cy-r-6, cx+r+6, cy+r+6,
-                              outline=C_GBEST_RING, width=2,
-                              fill="#e8fff4", dash=(4, 3))
+            c.create_text(cx,cy+r+12, text=f"{cat['fit']:.1f}",
+                          font=("Consolas",7,"bold" if ig else "normal"),
+                          fill="#1a9962" if ig else C_TEXT_DIM)
 
-            # Thân (oval đứng)
-            c.create_oval(cx-r, cy-r+3, cx+r, cy+r+3,
-                          fill=body_c, outline=border_c, width=border_w)
+            badge="★BEST" if ig else ("TRC" if mode=="trace" else "SEK")
+            bbg=C_GBEST_RING if ig else (C_TRACE_BODY if mode=="trace" else C_SEEK_BODY)
+            bwb=34
+            c.create_rectangle(cx-bwb//2,cy-r-16,cx+bwb//2,cy-r-3, fill=bbg,outline="")
+            c.create_text(cx,cy-r-9, text=badge, font=("Segoe UI",6,"bold"), fill="white")
 
-            # Tai
-            eh = max(5, r//2); ew = max(3, r//3)
-            c.create_polygon(cx-r+2,       cy-r+3,
-                             cx-r+2+ew,    cy-r+3-eh,
-                             cx-r+2+ew*2,  cy-r+3,
-                             fill=border_c, outline="")
-            c.create_polygon(cx+r-2,       cy-r+3,
-                             cx+r-2-ew,    cy-r+3-eh,
-                             cx+r-2-ew*2,  cy-r+3,
-                             fill=border_c, outline="")
-
-            # Mắt
-            ey  = cy - r//4 + 3
-            eof = r // 3
-            for ex in (cx - eof, cx + eof):
-                c.create_oval(ex-2, ey-2, ex+2, ey+2,
-                              fill="white", outline=border_c)
-                c.create_oval(ex-1, ey-1, ex+1, ey+1,
-                              fill="#111", outline="")
-
-            # Đuôi
-            tbx = cx + r - 2; tby = cy + r//2 + 3
-            if mode == "trace":
-                c.create_line(tbx, tby, tbx+r, tby-r//2,
-                              fill=border_c, width=2, smooth=True)
-            else:
-                c.create_line(tbx, tby,
-                              tbx+r//2, tby+r//2,
-                              tbx+r,    tby,
-                              fill=border_c, width=2, smooth=True)
-
-            # Fitness label
-            c.create_text(cx, cy+r+12,
-                          text=f"{cat['fit']:.1f}",
-                          font=("Consolas", 7,
-                                "bold" if is_gbest else "normal"),
-                          fill="#1a9962" if is_gbest else C_TEXT_DIM)
-
-            # Badge
-            badge = ("★BEST" if is_gbest
-                     else ("TRC" if mode == "trace" else "SEK"))
-            badge_bg = (C_GBEST_RING if is_gbest
-                        else (C_TRACE_BODY if mode == "trace" else C_SEEK_BODY))
-            bw2 = 34; bh2 = 13
-            c.create_rectangle(cx-bw2//2, cy-r-16,
-                               cx+bw2//2, cy-r-3,
-                               fill=badge_bg, outline="")
-            c.create_text(cx, cy-r-9, text=badge,
-                          font=("Segoe UI", 6, "bold"), fill="white")
-
-        # 6. Thống kê
-        n_seek  = sum(1 for ct in cats if ct["mode"] == "seek")
-        n_trace = sum(1 for ct in cats if ct["mode"] == "trace")
-
-        # 7. Tiêu đề
-        title = (f"CSO  |  Iter {frame_idx}/{max(0,len(self._cso_frames)-1)}"
-                 f"  ·  Best Fit: {frame['best_fit']:.1f}"
-                 f"  ·  Cats: {n_cats}")
-        c.create_text(plot_x0, 14, text=title,
-                      font=("Segoe UI", 10, "bold"),
+        ns=sum(1 for ct in cats if ct["mode"]=="seek")
+        nt=sum(1 for ct in cats if ct["mode"]=="trace")
+        title=(f"CSO  |  Iter {frame_idx}/{max(0,len(self._cso_frames)-1)}"
+               f"  ·  Best: {frame['best_fit']:.2f}  ·  Cats: {n_cats}")
+        c.create_text(PAD_L,14, text=title, font=("Segoe UI",10,"bold"),
                       fill=C_TEXT, anchor="w")
 
-        # 8. Legend
-        ly = H - LEGEND_H + 6
-        items = [
-            (C_SEEK_BODY,  "#cc6600", f"Seeking ({n_seek})"),
-            (C_TRACE_BODY, "#2244cc", f"Tracing ({n_trace})"),
-            (C_TRACE_BEST, "#1a9962", "Global Best"),
-        ]
-        lx = MARGIN
-        for bc_, oc, lbl in items:
-            c.create_oval(lx, ly+2, lx+12, ly+14,
-                          fill=bc_, outline=oc, width=2)
-            c.create_text(lx+17, ly+8, text=lbl,
-                          font=("Segoe UI", 8),
-                          fill=C_TEXT, anchor="w")
-            lx += 140
+        items=[(C_SEEK_BODY,"#cc6600",f"Seeking ({ns})"),
+               (C_TRACE_BODY,"#2244cc",f"Tracing ({nt})"),
+               (C_TRACE_BEST,"#1a9962","Global Best")]
+        lx=PAD_L
+        for bc_,oc,lbl in items:
+            c.create_oval(lx,py1+6,lx+12,py1+18, fill=bc_,outline=oc,width=2)
+            c.create_text(lx+16,py1+12, text=lbl, font=("Segoe UI",8),
+                          fill=C_TEXT,anchor="w")
+            lx+=148
 
-    # ══════════════════════════  PAN / ZOOM / RESIZE  ════════════════════════
+    # ══════════════════════════  CSO BEST-BAR  ════════════════════════════════
 
-    def _on_pan_start(self, e):
-        self._pan_start = (e.x - self._pan_x, e.y - self._pan_y)
+    def _draw_best_bar_cso(self, frame_idx: int):
+        bc = self._bb_canvas
+        try:    W=bc.winfo_width(); H=bc.winfo_height() or 64
+        except: return
+        if W < 10: return
+        bc.delete("all")
 
-    def _on_pan_move(self, e):
-        if self._pan_start:
-            self._pan_x = e.x - self._pan_start[0]
-            self._pan_y = e.y - self._pan_start[1]
-            if not self._running:
-                if self._algorithm == "CSO":
-                    self._draw_cso_frame(self._current_gen)
+        chrom=(self._frame_best_chroms[frame_idx]
+               if frame_idx<len(self._frame_best_chroms) else [])
+        fit  =(self._history[frame_idx]
+               if frame_idx<len(self._history) else 0.0)
+
+        LBL_W=190
+        bc.create_text(8,H//2,
+                       text=f"Best chromosome  iter {frame_idx}  ·  fit={fit:.2f}",
+                       font=("Segoe UI",8,"bold"), fill=C_TEXT, anchor="w")
+        if not chrom: return
+
+        n=len(chrom); x0=LBL_W; x1=W-8
+        bw=max(1,x1-x0); BAR_H=max(16,H-16)
+        y0=(H-BAR_H)//2; y1=y0+BAR_H; step=bw/n
+
+        for bi,bit in enumerate(chrom):
+            bx0=x0+bi*step
+            bc.create_rectangle(bx0,y0,bx0+step*0.88,y1,
+                                fill=C_BAR_1_BEST if bit else "#dde4f4",outline="")
+
+        bc.create_rectangle(x0,y0,x1,y1, outline=C_BORDER,fill="",width=1)
+        n1=sum(chrom)
+        bc.create_text(x1+4,H//2, text=f"{n1}/{n}",
+                       font=("Consolas",7), fill=C_TEXT_DIM, anchor="w")
+
+    # ══════════════════════════  3D PANEL  ════════════════════════════════════
+
+    def _setup_3d_panel(self):
+        if not _HAS_MPL: return
+        self._teardown_3d_panel()
+
+        W3D=280
+        f=tk.Frame(self._top_frame, bg=C_BG, width=W3D,
+                   highlightbackground=C_PANEL_BDR, highlightthickness=1)
+        f.pack(side="right", fill="y", padx=(4,0))
+        f.pack_propagate(False)
+        self._panel3d_frame=f
+
+        hdr=tk.Frame(f,bg=C_BG); hdr.pack(fill="x",padx=4,pady=(4,0))
+        tk.Label(hdr, text="3D Fitness Landscape",
+                 font=("Segoe UI",8,"bold"), bg=C_BG, fg=C_TEXT).pack(side="left")
+        tk.Button(hdr, text="⤢", font=("Segoe UI",9), bg=C_BG, fg="#4f7dff",
+                  relief="flat", cursor="hand2",
+                  command=self._open_3d_popup).pack(side="right")
+
+        fig=plt.Figure(figsize=(2.8,2.8), dpi=88, facecolor=C_BG)
+        ax =fig.add_subplot(111, projection="3d")
+        ax.set_facecolor(C_BG)
+        fig.subplots_adjust(left=0,right=1,top=1,bottom=0)
+        self._fig3d=fig; self._ax3d=ax
+
+        cv=FigureCanvasTkAgg(fig,master=f)
+        cv.get_tk_widget().pack(fill="both",expand=True,padx=4,pady=2)
+        cv.draw(); self._canvas3d=cv
+
+        tk.Label(f, text="Drag=xoay 4 góc  •  Scroll=zoom  •  ⤢=phóng to",
+                 font=("Segoe UI",7), bg=C_BG, fg=C_TEXT_DIM).pack(pady=(0,4))
+
+        w=cv.get_tk_widget()
+        w.bind("<ButtonPress-1>",   self._3d_drag_start)
+        w.bind("<B1-Motion>",       self._3d_drag_move)
+        w.bind("<ButtonRelease-1>", self._3d_drag_end)
+        w.bind("<MouseWheel>",      self._3d_scroll)
+        w.bind("<Button-4>",        self._3d_scroll)
+        w.bind("<Button-5>",        self._3d_scroll)
+
+        self._rot_angle=30.0; self._rot_elev=28.0; self._3d_zoom_scale=1.0
+        self._start_3d_rotation()
+
+    def _init_3d_surface(self):
+        if not _HAS_MPL or self._ax3d is None: return
+        ax=self._ax3d; ax.cla(); ax.set_facecolor(C_BG)
+        N=20; xs=np.linspace(-10,10,N); ys=np.linspace(-10,10,N)
+        X,Y=np.meshgrid(xs,ys); Z=X**2+Y**2
+        ax.plot_surface(X,Y,Z, cmap="YlGn", alpha=0.80,
+                        linewidth=0, antialiased=False)
+        ax.set_xlabel("x₁",fontsize=7,labelpad=1)
+        ax.set_ylabel("x₂",fontsize=7,labelpad=1)
+        ax.set_zlabel("f(x)",fontsize=7,labelpad=1)
+        ax.tick_params(labelsize=6)
+        self._3d_scatters=[]
+        self._apply_3d_zoom(ax)
+
+    def _apply_3d_zoom(self, ax):
+        r=10.0/self._3d_zoom_scale
+        ax.set_xlim(-r,r); ax.set_ylim(-r,r)
+
+    def _draw_3d_surface(self):
+        if self._ax3d is None: return
+        ax=self._ax3d
+        for sc in self._3d_scatters:
+            try: sc.remove()
+            except: pass
+        self._3d_scatters=[]
+
+        if self._cso_frames and 0<=self._current_gen<len(self._cso_frames):
+            for cat in self._cso_frames[self._current_gen].get("cats",[]):
+                cx=(cat["x"]-0.5)*20; cy=(cat["y"]-0.5)*20; cz=cx**2+cy**2+2
+                if cat["is_gbest"]:
+                    sc=ax.scatter([cx],[cy],[cz],c="#2ecb7e",s=55,
+                                  edgecolors="white",linewidths=1.2,depthshade=False)
+                elif cat["mode"]=="trace":
+                    sc=ax.scatter([cx],[cy],[cz],c="#4f7dff",s=25,
+                                  edgecolors="white",linewidths=0.5,alpha=0.9,depthshade=False)
                 else:
-                    self._draw_ga_frame(self._current_gen)
+                    sc=ax.scatter([cx],[cy],[cz],c="#ffb347",s=20,alpha=0.8,depthshade=False)
+                self._3d_scatters.append(sc)
 
-    def _on_pan_end(self, e):
-        self._pan_start = None
+        ax.view_init(elev=self._rot_elev, azim=self._rot_angle)
 
-    def _on_scroll(self, e):
-        if self._algorithm == "CSO":
-            return
-        factor = 1.1 if (getattr(e, "delta", 0) > 0 or e.num == 4) else 0.9
-        mx = e.x; my = e.y
-        self._pan_x = mx - (mx - self._pan_x) * factor
-        self._pan_y = my - (my - self._pan_y) * factor
-        self._scale = max(0.08, min(3.0, self._scale * factor))
-        if not self._running:
-            self._draw_ga_frame(self._current_gen)
+    def _start_3d_rotation(self):
+        self._stop_3d_rotation()
+        self._init_3d_surface()
+        self._do_rotate_3d()
+
+    def _stop_3d_rotation(self):
+        if self._rot_id:
+            try: self.after_cancel(self._rot_id)
+            except: pass
+            self._rot_id=None
+
+    def _do_rotate_3d(self):
+        if self._fig3d is None or self._ax3d is None or self._canvas3d is None: return
+        if not self._3d_dragging:
+            self._rot_angle=(self._rot_angle+1.0)%360
+            self._draw_3d_surface()
+            try: self._canvas3d.draw_idle()
+            except: return
+        self._rot_id=self.after(80,self._do_rotate_3d)
+
+    def _3d_drag_start(self,e):
+        self._3d_drag_last=(e.x,e.y); self._3d_dragging=True
+
+    def _3d_drag_move(self,e):
+        if self._3d_drag_last and self._ax3d:
+            lx,ly=self._3d_drag_last
+            dx=e.x-lx; dy=e.y-ly
+            self._rot_angle=(self._rot_angle-dx*0.7)%360
+            # kéo lên (dy âm) → nhìn từ cao hơn (elev tăng)
+            self._rot_elev=max(-90,min(90, self._rot_elev+dy*0.5))
+        self._3d_drag_last=(e.x,e.y)
+        self._draw_3d_surface()
+        try: self._canvas3d.draw_idle()
+        except: pass
+
+    def _3d_drag_end(self,e):
+        self._3d_dragging=False; self._3d_drag_last=None
+
+    def _3d_scroll(self,e):
+        delta=getattr(e,"delta",0)
+        if delta>0 or e.num==4:
+            self._3d_zoom_scale=min(5.0,self._3d_zoom_scale*1.15)
+        else:
+            self._3d_zoom_scale=max(0.2,self._3d_zoom_scale/1.15)
+        if self._ax3d:
+            self._apply_3d_zoom(self._ax3d)
+            self._draw_3d_surface()
+            try: self._canvas3d.draw_idle()
+            except: pass
+
+    def _open_3d_popup(self):
+        if not _HAS_MPL: return
+        win=tk.Toplevel(self)
+        win.title("3D Fitness Landscape — Phóng to")
+        win.geometry("680x560"); win.configure(bg=C_BG)
+
+        fig2=plt.Figure(figsize=(6.8,5.2),dpi=96,facecolor=C_BG)
+        ax2 =fig2.add_subplot(111,projection="3d"); ax2.set_facecolor(C_BG)
+        N=30; xs=np.linspace(-10,10,N); ys=np.linspace(-10,10,N)
+        X,Y=np.meshgrid(xs,ys); Z=X**2+Y**2
+        ax2.plot_surface(X,Y,Z,cmap="YlGn",alpha=0.82,linewidth=0,antialiased=True)
+        ax2.set_xlabel("x₁",fontsize=9); ax2.set_ylabel("x₂",fontsize=9)
+        ax2.set_zlabel("f(x)",fontsize=9)
+        ax2.view_init(elev=self._rot_elev,azim=self._rot_angle)
+
+        if self._cso_frames and 0<=self._current_gen<len(self._cso_frames):
+            for cat in self._cso_frames[self._current_gen].get("cats",[]):
+                cx=(cat["x"]-0.5)*20; cy=(cat["y"]-0.5)*20; cz=cx**2+cy**2+2
+                col=("#2ecb7e" if cat["is_gbest"] else
+                     "#4f7dff" if cat["mode"]=="trace" else "#ffb347")
+                ax2.scatter([cx],[cy],[cz],c=col,s=80,edgecolors="white",linewidths=1.2)
+
+        cv2=FigureCanvasTkAgg(fig2,master=win)
+        cv2.get_tk_widget().pack(fill="both",expand=True,padx=8,pady=8)
+
+        st={"angle":self._rot_angle,"elev":self._rot_elev,"last":None,"zoom":1.0}
+
+        def p_start(e): st["last"]=(e.x,e.y)
+        def p_move(e):
+            if st["last"]:
+                lx,ly=st["last"]
+                st["angle"]=(st["angle"]-(e.x-lx)*0.7)%360
+                st["elev"]=max(-90,min(90,st["elev"]+(e.y-ly)*0.5))
+                ax2.view_init(elev=st["elev"],azim=st["angle"])
+                cv2.draw_idle()
+            st["last"]=(e.x,e.y)
+        def p_end(e): st["last"]=None
+        def p_scroll(e):
+            d=getattr(e,"delta",0)
+            if d>0 or e.num==4: st["zoom"]=min(5.0,st["zoom"]*1.15)
+            else:                st["zoom"]=max(0.2,st["zoom"]/1.15)
+            r=10.0/st["zoom"]
+            ax2.set_xlim(-r,r); ax2.set_ylim(-r,r); cv2.draw_idle()
+
+        w2=cv2.get_tk_widget()
+        w2.bind("<ButtonPress-1>",p_start); w2.bind("<B1-Motion>",p_move)
+        w2.bind("<ButtonRelease-1>",p_end)
+        w2.bind("<MouseWheel>",p_scroll); w2.bind("<Button-4>",p_scroll)
+        w2.bind("<Button-5>",p_scroll)
+
+        tk.Label(win,text="Kéo chuột=xoay 4 góc  •  Scroll=zoom",
+                 font=("Segoe UI",8),bg=C_BG,fg=C_TEXT_DIM).pack(pady=(0,6))
+        cv2.draw()
+
+        def on_close():
+            try: plt.close(fig2)
+            except: pass
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW",on_close)
+
+    def _teardown_3d_panel(self):
+        self._stop_3d_rotation()
+        if self._panel3d_frame:
+            try: self._panel3d_frame.destroy()
+            except: pass
+            self._panel3d_frame=None
+        if self._fig3d:
+            try: plt.close(self._fig3d)
+            except: pass
+        self._fig3d=self._ax3d=self._canvas3d=None
+        self._3d_scatters=[]
+
+    # ══════════════════════════  RESIZE  ══════════════════════════════════════
 
     def _on_resize(self, e):
-        if self._algorithm == "GA" and not self._running and self._populations:
-            # Recompute auto zoom khi cửa sổ thay đổi kích thước
-            self._auto_zoom_ga()
-        if not self._running:
-            if self._algorithm == "CSO":
-                self._draw_cso_frame(self._current_gen)
-            else:
-                self._draw_ga_frame(self._current_gen)
-
-    # ══════════════════════════  UTIL  ═══════════════════════════════════════
-
-    def _rrect(self, x1, y1, x2, y2, r=4, **kw):
-        x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
-        if x2 < x1: x1, x2 = x2, x1
-        if y2 < y1: y1, y2 = y2, y1
-        r = float(max(0, min(r, (x2-x1)/2, (y2-y1)/2)))
-        pts = [x1+r,y1, x2-r,y1, x2,y1, x2,y1+r,
-               x2,y2-r, x2,y2, x2-r,y2, x1+r,y2,
-               x1,y2, x1,y2-r, x1,y1+r, x1,y1, x1+r,y1]
-        self._canvas.create_polygon(pts, smooth=True, **kw)
+        if self._running: return
+        if self._algorithm == "CSO":
+            self._draw_cso_frame(self._current_gen)
+            self._draw_best_bar_cso(self._current_gen)
+        else:
+            self._draw_ga_frame(self._current_gen)
