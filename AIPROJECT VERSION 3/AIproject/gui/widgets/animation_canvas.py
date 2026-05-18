@@ -515,14 +515,20 @@ class AnimationCanvas(tk.Frame):
                if frame_idx<len(self._frame_best_chroms) else [])
         fit  =(self._history[frame_idx]
                if frame_idx<len(self._history) else 0.0)
+        LBL_W = 270
+        bc.create_text(
+            8, H//2,
+            text=f"Best chromosome  iter {frame_idx + 1}  ·  fit={fit:.2f}",
+            font=("Segoe UI", 8, "bold"),
+            fill=C_TEXT,
+            anchor="w"
+        ) 
+        if not chrom:
+            return
+        n = len(chrom)
+        x0 = LBL_W
+        x1 = W - 8
 
-        LBL_W=190
-        bc.create_text(8,H//2,
-                       text=f"Best chromosome  iter {frame_idx + 1}  ·  fit={fit:.2f}",
-                       font=("Segoe UI",8,"bold"), fill=C_TEXT, anchor="w")
-        if not chrom: return
-
-        n=len(chrom); x0=LBL_W; x1=W-8
         bw=max(1,x1-x0); BAR_H=max(16,H-16)
         y0=(H-BAR_H)//2; y1=y0+BAR_H; step=bw/n
 
