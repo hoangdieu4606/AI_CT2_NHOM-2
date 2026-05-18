@@ -483,8 +483,12 @@ class AnimationCanvas(tk.Frame):
 
         ns=sum(1 for ct in cats if ct["mode"]=="seek")
         nt=sum(1 for ct in cats if ct["mode"]=="trace")
-        title=(f"CSO  |  Iter {frame_idx}/{max(0,len(self._cso_frames)-1)}"
-               f"  ·  Best: {frame['best_fit']:.2f}  ·  Cats: {n_cats}")
+        display_iter = frame_idx + 1
+        display_total = len(self._cso_frames)
+
+        title=(f"CSO  |  Iter {display_iter}/{display_total}"
+        f"  ·  Best: {frame['best_fit']:.2f}  ·  Cats: {n_cats}")
+        
         c.create_text(PAD_L,14, text=title, font=("Segoe UI",10,"bold"),
                       fill=C_TEXT, anchor="w")
 
@@ -514,7 +518,7 @@ class AnimationCanvas(tk.Frame):
 
         LBL_W=190
         bc.create_text(8,H//2,
-                       text=f"Best chromosome  iter {frame_idx}  ·  fit={fit:.2f}",
+                       text=f"Best chromosome  iter {frame_idx + 1}  ·  fit={fit:.2f}",
                        font=("Segoe UI",8,"bold"), fill=C_TEXT, anchor="w")
         if not chrom: return
 
