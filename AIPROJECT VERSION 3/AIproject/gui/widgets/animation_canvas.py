@@ -258,7 +258,7 @@ class AnimationCanvas(tk.Frame):
         step = max(1, n // 20)
         for bi in range(0, n, step):
             xc = bx0 + (bi + 0.5) * sw
-            c.create_text(xc, by1 + 10, text=str(bi),
+            c.create_text(xc, by1 + 10, text=str(bi+1),
                           font=("Consolas", 6), fill=C_TEXT_DIM, anchor="n")
         c.create_text(bx0, by1 + 22, text="Bit index →",
                       font=("Segoe UI", 7), fill=C_TEXT_DIM, anchor="nw")
