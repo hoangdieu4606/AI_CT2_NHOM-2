@@ -190,9 +190,13 @@ class AnimationCanvas(tk.Frame):
 
         # ── Tiêu đề ──────────────────────────────────────────────────────────
         n_ones = sum(chrom) if chrom else 0
-        title  = (f"GA  |  Gen {gen}/{n_total-1}"
-                  f"  ·  Best fit: {fit:.2f}"
-                  f"  ·  Genes ON: {n_ones}/{n_items}")
+        display_gen = gen + 1
+        display_total = n_total
+
+        title = (f"GA  |  Gen {display_gen}/{display_total}"
+                 f"  ·  Best fit: {fit:.2f}"
+                 f"  ·  Genes ON: {n_ones}/{n_items}")   
+        
         c.create_text(16, 22, text=title,
                       font=("Segoe UI", 11, "bold"),
                       fill=C_TEXT, anchor="w")
