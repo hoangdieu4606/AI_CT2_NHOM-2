@@ -516,9 +516,19 @@ class App(tk.Tk):
 
         hdr = _fr(p); hdr.pack(fill="x", padx=14, pady=(6,2))
         _lbl(hdr, "Biểu đồ", font=FNB, fg=TEXT).pack(side="left")
-        tk.Button(hdr, text="⤢ phóng to", font=FNS, bg=SURFACE, fg=ACCENT,
-                  relief="flat", cursor="hand2", padx=4,
-                  command=self._zoom_chart).pack(side="right")
+        self._zoom_btn = tk.Button(
+            hdr,
+            text="⤢ phóng to",
+            font=FNS,
+            bg=SURFACE,
+            fg=ACCENT,
+            relief="flat",
+            cursor="hand2",
+            padx=4,
+            command=self._zoom_chart
+        )
+# Không pack ở đây, sẽ pack tuỳ chế độ
+      
         _sep(p).pack(fill="x", padx=10)
 
         # Container — bind resize vào đây
@@ -552,23 +562,34 @@ class App(tk.Tk):
         self._active_fig = self._fig_single
 
         self._show_chart_for_mode("single")
-
     def _show_chart_for_mode(self, mode: str):
-        """Hiện canvas đúng với mode, ẩn canvas còn lại."""
         if mode == "single":
+            # Hiển thị canvas Single Run
             self._canvas_bench.get_tk_widget().pack_forget()
             self._canvas_single.get_tk_widget().pack(fill="both", expand=True)
             self._ax         = self._ax_single
             self._canvas     = self._canvas_single
             self._active_fig = self._fig_single
-        else:
+    
+            # Hiện nút phóng to
+            if hasattr(self, "_zoom_btn"):
+                self._zoom_btn.pack(side="right")
+
+        else:  # Benchmark
+            # Hiển thị canvas Benchmark
             self._canvas_single.get_tk_widget().pack_forget()
             self._canvas_bench.get_tk_widget().pack(fill="both", expand=True)
             self._ax         = self._ax_bench
             self._canvas     = self._canvas_bench
             self._active_fig = self._fig_bench
+    
+            # Ẩn nút phóng to
+            if hasattr(self, "_zoom_btn"):
+                self._zoom_btn.pack_forget()
+    
         self._canvas.draw_idle()
 
+   
     def _on_chart_resize(self, event):
         w = event.width; h = event.height
         if w < 20 or h < 20:
